@@ -1,0 +1,10 @@
+opencv-python>=4.8.0
+customtkinter>=5.2.0
+Pillow>=10.0.0
+ultralytics>=8.0.0
+shapely>=2.0.0
+numpy>=1.24.0
+pystray>=0.19.0
+
+# ใช้ตอน build เป็น .exe เท่านั้น (ไม่จำเป็นสำหรับรัน dev)
+pyinstaller>=6.0.0
