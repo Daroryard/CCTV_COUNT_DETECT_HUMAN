@@ -110,7 +110,7 @@ py cctv_app.py
 
 - `cctv_app.py`
 - `multi_config.json`
-- `yolov8n.pt` (ถ้ายังไม่มี Ultralytics จะพยายามดาวน์โหลดให้)
+- `yolov8s.pt` (ถ้ายังไม่มี Ultralytics จะพยายามดาวน์โหลดให้)
 - ไฟล์วิดีโอที่อ้างใน config เช่น `test.mp4`
 
 ---
@@ -211,7 +211,7 @@ py -m PyInstaller --onefile --windowed --icon=cctv-camera.ico --distpath=..\dist
 | เปิดวิดีโอไม่ได้ | ตรวจ path ใน Settings และว่าไฟล์อยู่จริง |
 | RTSP ไม่ขึ้น | ตรวจ URL, user/password, และ network/firewall |
 | ช้ามาก / CPU 100% | ลดจำนวนช่องที่เปิด หรือใช้ GPU + CUDA |
-| ไม่มี `yolov8n.pt` | รันโปรแกรมครั้งแรกให้ดาวน์โหลด หรือ copy ไฟล์ model มาวาง |
+| ไม่มี `yolov8s.pt` | รันโปรแกรมครั้งแรกให้ดาวน์โหลด หรือ copy ไฟล์ model มาวาง |
 | CustomTkinter ไม่ขึ้น UI | `pip install --upgrade customtkinter` |
 
 ---
