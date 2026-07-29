@@ -88,8 +88,7 @@ class CCTVApp(ctk.CTk):
         super().__init__()
    
         self.title("🎬 Enterprise Multi-CCTV AI Analytics (Fixed System V3)")
-        self.geometry("1480(x)860" if os.name == 'nt' else "1480x860")
-        self.geometry("1500x880")
+        self.geometry("1480x860")
         self.resizable(False, False)
         
         self.lock = threading.Lock()
@@ -102,11 +101,20 @@ class CCTVApp(ctk.CTk):
         self.id_maps_pool = [{} for _ in range(MAX_CHANNELS)]
         
         self.current_setting_ch = 0 
-  
+        
+        # 1. โหลด Config ดึงข้อมูลขึ้นมาก่อน (จะทำการโหลดค่า global_model_name มาให้ด้วย)
         self.load_multi_config()
         self.load_daily_logs()
         
-        self.model = YOLO("yolov8n.pt")
+        # 🚀 2. ดึงชื่อ Master Model จากตัวแปรกลางของระบบมาโหลด
+        default_model_name = getattr(self, 'global_model_name', "yolov8s")
+            
+        self.model = YOLO(f"{default_model_name}.pt")
+        
+        # ย้ายมาใส่ Device ให้เรียบร้อยตั้งแต่เริ่มต้น
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model.to(dev)
         
         self.protocol('WM_DELETE_WINDOW', self.withdraw_to_background)
         self.setup_tray()
@@ -123,6 +131,11 @@ class CCTVApp(ctk.CTk):
         
         self.setup_monitor_page()
         self.setup_setting_page()
+        
+        # 🚀 3. อัปเดตช่อง ComboBox ของ Master Model ในหน้า Setting ให้ตรงกับค่าที่โหลดมา
+        if hasattr(self, 'combo_model'):
+            self.combo_model.set(default_model_name)
+            
         self.refresh_log_table()
 
     def on_tab_changed(self):
@@ -142,15 +155,42 @@ class CCTVApp(ctk.CTk):
                 print(f"Error updating grid on tab change: {e}")
 
     def load_multi_config(self):
+        self.global_model_name = "yolov8s"  # ค่าเริ่มต้น
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    self.channels_data = json.load(f)
+                    data = json.load(f)
+                    
+                # รองรับโครงสร้างใหม่ที่มี global_model แยกออกมา
+                if isinstance(data, dict):
+                    self.global_model_name = data.get("global_model", "yolov8s")
+                    self.channels_data = data.get("channels", [])
+                elif isinstance(data, list):
+                    # รองรับไฟล์ config แบบเก่าที่เป็น list ของช่อง
+                    self.channels_data = data
+                    self.global_model_name = "yolov8s"
+                    
+                # เผื่อช่องข้อมูลไม่ครบ MAX_CHANNELS
+                if len(self.channels_data) < MAX_CHANNELS:
+                    self.generate_default_channels()
+                    
             except Exception:
                 self.generate_default_channels()
+                self.save_multi_config()
         else:
             self.generate_default_channels()
             self.save_multi_config()
+
+    def save_multi_config(self):
+        try:
+            data = {
+                "global_model": getattr(self, 'global_model_name', "yolov8s"),
+                "channels": self.channels_data
+            }
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving config: {e}")
 
     def generate_default_channels(self):
         self.channels_data = []
@@ -166,8 +206,15 @@ class CCTVApp(ctk.CTk):
             })
 
     def save_multi_config(self):
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.channels_data, f, indent=4, ensure_ascii=False)
+        try:
+            data = {
+                "global_model": getattr(self, 'global_model_name', "yolov8s"),
+                "channels": self.channels_data
+            }
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error saving config: {e}")
 
     def load_daily_logs(self):
         if os.path.exists(LOG_FILE):
@@ -423,140 +470,142 @@ class CCTVApp(ctk.CTk):
 
     # ==================== STREAM PROCESSING (DYNAMIC RE-SCALING AREA) ====================
     def process_single_channel_stream(self, ch_idx, current_v, target_label):
-        ch_conf = self.channels_data[ch_idx]
-        source = ch_conf["video_path"] if ch_conf["source_type"] == "video" else ch_conf["dvr_rtsp"]
-        
-        cap = cv2.VideoCapture(source)
-        # ปรับ Buffer ให้ต่ำที่สุด
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) 
-        self.caps[ch_idx] = cap
-        
-        w_box = target_label.target_w
-        h_box = target_label.target_h
-        
-        orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        if orig_w == 0 or orig_h == 0:
-            orig_w, orig_h = 1280, 720
+            ch_conf = self.channels_data[ch_idx]
+            source = ch_conf["video_path"] if ch_conf["source_type"] == "video" else ch_conf["dvr_rtsp"]
             
-        scale_orig_x = orig_w / 850.0
-        scale_orig_y = orig_h / 550.0
-        
-        raw_poly_points = ch_conf.get("area_polygon", [])
-        native_poly_points = [[int(pt[0] * scale_orig_x), int(pt[1] * scale_orig_y)] for pt in raw_poly_points]
-        
-        if len(native_poly_points) >= 3:
-            poly_zone = Polygon(native_poly_points)
-        else:
-            poly_zone = None
+            cap = cv2.VideoCapture(source)
+            # ปรับ Buffer ให้ต่ำที่สุด เพื่อลดดีเลย์ภาพสด
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) 
+            self.caps[ch_idx] = cap
             
-        # ⚡ ตัวนับเฟรมสำหรับทำ Frame Skipping และระบบจดจำพิกัดล่าสุด
-        frame_counter = 0
-        last_boxes = []
-        last_ids = []
-        
-        while cap.isOpened():
-            if not self.is_running_channels[ch_idx] or current_v != self.stream_versions[ch_idx]:
-                break
+            w_box = target_label.target_w
+            h_box = target_label.target_h
+            
+            orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if orig_w == 0 or orig_h == 0:
+                orig_w, orig_h = 1280, 720
                 
-            # หาก CPU เริ่มประมวลผลช้า ให้เคลียร์เฟรมเก่าที่ตกค้างอยู่ใน Buffer ทิ้งไปก่อน
-            if frame_counter % 2 == 0:
-                cap.grab()
-                
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                if ch_conf["source_type"] == "video":
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    time.sleep(0.03)
-                    continue
-                else:
-                    time.sleep(1.0)
-                    break
+            scale_orig_x = orig_w / 850.0
+            scale_orig_y = orig_h / 550.0
             
-            frame_counter += 1
+            raw_poly_points = ch_conf.get("area_polygon", [])
+            native_poly_points = [[int(pt[0] * scale_orig_x), int(pt[1] * scale_orig_y)] for pt in raw_poly_points]
             
-            # 🚀 ส่งเข้าตรวจจับข้ามเว้นระยะทุก ๆ 3 เฟรม (สมดุลที่สุดระหว่างความเร็วและ CPU โหลด)
-            if frame_counter % 3 == 0:
-                try:
-                    # ตรวจสอบว่ามี CUDA หรือไม่เพื่อเลือก Device แบบ Real-time
-                    import torch
-                    dev = "cuda" if torch.cuda.is_available() else "cpu"
-                except Exception:
-                    dev = "cpu"
-                    
-                # รัน Tracking แบบแยกอิสระ แม่นยำ และปลอดภัยต่อ Thread
-                results = self.model.track(
-                    frame, 
-                    persist=True, 
-                    classes=[0], 
-                    verbose=False, 
-                    imgsz=640,       # ปรับกลับมาเป็น 640 เพื่อให้การตรวจจับแม่นยำ คนไม่หาย
-                    conf=0.35,       # ค่าความมั่นใจเริ่มต้นที่เหมาะสม
-                    device=dev       # กำหนดตัวแปรประมวลผลที่เช็กแล้วชัวร์
-                )
-                
-                if results and results[0].boxes is not None and results[0].boxes.id is not None:
-                    last_boxes = results[0].boxes.xyxy.cpu().numpy()
-                    last_ids = results[0].boxes.id.cpu().numpy().astype(int)
-                else:
-                    last_boxes = []
-                    last_ids = []
-            
-            # วาดกรอบและคำนวณการตรวจนับจากพิกัดเฟรมล่าสุดที่บันทึกไว้
-            if poly_zone is not None and len(last_boxes) > 0:
-                for box, track_id in zip(last_boxes, last_ids):
-                    x1, y1, x2, y2 = box
-                    foot_x = int((x1 + x2) / 2)
-                    foot_y = int(y2)
-                    foot_point = Point(foot_x, foot_y)
-                    
-                    is_inside = poly_zone.contains(foot_point)
-                    
-                    if is_inside and track_id not in self.inside_ids_pool[ch_idx]:
-                        self.inside_ids_pool[ch_idx].add(track_id)
-                        self.people_counts[ch_idx] += 1
-                        self.id_maps_pool[ch_idx][track_id] = self.people_counts[ch_idx]
-                        
-                        # รันงานบันทึก Log ใน background thread
-                        threading.Thread(target=self.save_daily_log, args=(ch_idx,), daemon=True).start()
-                        self.after(0, self.refresh_log_table)
-                        
-                    if track_id in self.id_maps_pool[ch_idx]:
-                        lbl_txt = f"CH{ch_idx+1} No.{self.id_maps_pool[ch_idx][track_id]}"
-                    else:
-                        lbl_txt = f"Detecting"
-                        
-                    color = (46, 204, 113) if is_inside else (231, 76, 60)
-                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                    cv2.putText(frame, lbl_txt, (int(x1), int(y1) - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            
-            # วาดเส้นเขตแดนบนความละเอียดจริง
             if len(native_poly_points) >= 3:
-                area_bgr = self.hex_to_bgr(ch_conf.get("area_color", DEFAULT_AREA_COLOR))
-                pts = np.array(native_poly_points, np.int32).reshape((-1, 1, 2))
-                cv2.polylines(frame, [pts], isClosed=True, color=area_bgr, thickness=3)
-
-            # ย่อภาพลงมาแสดงผลในตาราง Grid
-            frame = cv2.resize(frame, (w_box, h_box))
-            
-            # Banner
-            cv2.rectangle(frame, (0, 0), (w_box, 25), (44, 62, 80), -1)
-            cv2.putText(frame, f"CAM {ch_idx+1} | COUNTS: {self.people_counts[ch_idx]} P", 
-                        (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (241, 196, 15), 1, cv2.LINE_AA)
-            
-            # ส่งภาพขึ้น Tkinter UI
-            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(cv2image)
-            imgtk = ImageTk.PhotoImage(image=img)
-            
-            if self.is_running_channels[ch_idx] and current_v == self.stream_versions[ch_idx]:
-                target_label.configure(image=imgtk, text="")
-                target_label._image_cache = imgtk
+                poly_zone = Polygon(native_poly_points)
+            else:
+                poly_zone = None
                 
-            # เพิ่มเวลาพักคิวของ Thread เล็กน้อยให้ระบบอื่นระบายโหลดทัน
-            time.sleep(0.03)
+            # ⚡ ตรวจสอบ Device และเตรียมค่าคงที่ไว้ล่วงหน้า (เช็คครั้งเดียวจบ ไม่ต้องเช็คใน Loop)
+            import torch
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            use_half = True if dev == "cuda" else False  # ใช้ FP16 เฉพาะตอนรัน GPU เพื่อความเร็วสูงสุด
+                
+            frame_counter = 0
+            last_boxes = []
+            last_ids = []
             
-        cap.release()
+            while cap.isOpened():
+                if not self.is_running_channels[ch_idx] or current_v != self.stream_versions[ch_idx]:
+                    break
+                    
+                # เคลียร์เฟรมตกค้างใน Buffer (สำหรับ RTSP เพื่อป้องกันภาพดีเลย์สะสม)
+                if frame_counter % 2 == 0 and ch_conf["source_type"] != "video":
+                    cap.grab()
+                    
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    if ch_conf["source_type"] == "video":
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        time.sleep(0.03)
+                        continue
+                    else:
+                        time.sleep(1.0)
+                        break
+                
+                frame_counter += 1
+                
+                # 🚀 ข้ามเฟรม (Frame Skipping) ทุกๆ 3 เฟรม เพื่อลดโหลดการประมวลผล AI
+                if frame_counter % 3 == 0:
+                    try:
+                        # รัน Tracking พร้อมเปิด half=True (ถ้าใช้ CUDA) เพื่อเร่งความเร็วบน GPU
+                        results = self.model.track(
+                            frame, 
+                            persist=True, 
+                            classes=[0], 
+                            verbose=False, 
+                            imgsz=640,       # ขนาดกำลังดี (ถ้ายังกระตุก ลองลดเหลือ 512 หรือ 416)
+                            conf=0.25,       
+                            device=dev    
+                        )
+                        
+                        if results and results[0].boxes is not None and results[0].boxes.id is not None:
+                            # ดึงข้อมูลแปลงเป็น Numpy ทีเดียวเพื่อความเร็ว
+                            last_boxes = results[0].boxes.xyxy.cpu().numpy()
+                            last_ids = results[0].boxes.id.cpu().numpy().astype(int)
+                        else:
+                            last_boxes = []
+                            last_ids = []
+                    except Exception as e:
+                        # ป้องกันเคส GPU Error หรือ CUDA Out of Memory ฉุกเฉิน
+                        last_boxes = []
+                        last_ids = []
+                
+                # วาดกรอบและคำนวณการตรวจนับ
+                if poly_zone is not None and len(last_boxes) > 0:
+                    for box, track_id in zip(last_boxes, last_ids):
+                        x1, y1, x2, y2 = box
+                        foot_x = int((x1 + x2) / 2)
+                        foot_y = int(y2)
+                        foot_point = Point(foot_x, foot_y)
+                        
+                        is_inside = poly_zone.contains(foot_point)
+                        
+                        if is_inside and track_id not in self.inside_ids_pool[ch_idx]:
+                            self.inside_ids_pool[ch_idx].add(track_id)
+                            self.people_counts[ch_idx] += 1
+                            self.id_maps_pool[ch_idx][track_id] = self.people_counts[ch_idx]
+                            
+                            threading.Thread(target=self.save_daily_log, args=(ch_idx,), daemon=True).start()
+                            self.after(0, self.refresh_log_table)
+                            
+                        if track_id in self.id_maps_pool[ch_idx]:
+                            lbl_txt = f"CH{ch_idx+1} No.{self.id_maps_pool[ch_idx][track_id]}"
+                        else:
+                            lbl_txt = f"Detecting"
+                            
+                        color = (46, 204, 113) if is_inside else (231, 76, 60)
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                        cv2.putText(frame, lbl_txt, (int(x1), int(y1) - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                # วาดเส้นเขตแดน
+                if len(native_poly_points) >= 3:
+                    area_bgr = self.hex_to_bgr(ch_conf.get("area_color", DEFAULT_AREA_COLOR))
+                    pts = np.array(native_poly_points, np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(frame, [pts], isClosed=True, color=area_bgr, thickness=3)
+
+                # ย่อภาพลงมาแสดงผลในตาราง Grid
+                frame = cv2.resize(frame, (w_box, h_box))
+                
+                # Banner
+                cv2.rectangle(frame, (0, 0), (w_box, 25), (44, 62, 80), -1)
+                cv2.putText(frame, f"CAM {ch_idx+1} | COUNTS: {self.people_counts[ch_idx]} P", 
+                            (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (241, 196, 15), 1, cv2.LINE_AA)
+                
+                # ส่งภาพขึ้น Tkinter UI (แปลงช่องทางสีครั้งเดียวจบ)
+                cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(cv2image)
+                imgtk = ImageTk.PhotoImage(image=img)
+                
+                if self.is_running_channels[ch_idx] and current_v == self.stream_versions[ch_idx]:
+                    target_label.configure(image=imgtk, text="")
+                    target_label._image_cache = imgtk
+                    
+                # พัก Thread สั้นๆ เพื่อแบ่งทรัพยากรให้ GUI ทำงานได้ราบรื่น
+                time.sleep(0.01)
+                
+            cap.release()
 
     # ==================== SETTING PANEL (UI RE-ARRANGED) ====================
     def setup_setting_page(self):
@@ -568,8 +617,29 @@ class CCTVApp(ctk.CTk):
         frame_preview = ctk.CTkFrame(self.tab_setting)
         frame_preview.pack(side="right", fill="both", expand=True, padx=10, pady=10)
         
+        # 🚀 1. ส่วนเลือก Master AI Model (ย้ายมาไว้บนสุด เพื่อคุมภาพรวมทั้งระบบ)
+        lbl_model_title = ctk.CTkLabel(frame_inputs, text="🎯 Master AI Model (Apply All Channels):", font=("Arial", 14, "bold"), text_color="#3498DB")
+        lbl_model_title.pack(anchor="w", padx=20, pady=(10, 5))
+        
+        model_options = ["yolov8s", "yolov8m"]
+        self.combo_model = ctk.CTkComboBox(
+            frame_inputs, 
+            values=model_options, 
+            command=self.on_master_model_changed, 
+            width=320, 
+            font=("Arial", 13)
+        )
+        self.combo_model.pack(anchor="w", padx=30, pady=5)
+        # เซ็ตค่าตามค่ากลางที่โหลดมาจาก config (fallback เป็น yolov8s)
+        self.combo_model.set(getattr(self, 'global_model_name', "yolov8s"))
+        
+        # เส้นคั่นแบ่งสัดส่วนระหว่าง Global Settings กับ Channel Settings
+        sep = ctk.CTkFrame(frame_inputs, height=2, fg_color="#34495E")
+        sep.pack(fill="x", padx=20, pady=15)
+        
+        # 2. ส่วนเลือก Channel สำหรับตั้งค่ากล้องแต่ละตัว
         lbl_selector = ctk.CTkLabel(frame_inputs, text="Select Channel to Configure:", font=("Arial", 15, "bold"), text_color="#F1C40F")
-        lbl_selector.pack(anchor="w", padx=20, pady=10)
+        lbl_selector.pack(anchor="w", padx=20, pady=5)
         
         ch_options = [f"Channel {i+1}" for i in range(MAX_CHANNELS)]
         self.combo_ch = ctk.CTkComboBox(frame_inputs, values=ch_options, command=self.on_setting_channel_changed, width=320, font=("Arial", 13))
@@ -578,10 +648,10 @@ class CCTVApp(ctk.CTk):
         
         # ผูกตัวแปร Checkbox เข้ากับระบบ BooleanVar
         self.chk_enabled = ctk.CTkCheckBox(frame_inputs, text="Enable this Camera Channel in Grid Layout", variable=self.chk_enabled_var, font=("Arial", 12, "bold"), text_color="#2ECC71")
-        self.chk_enabled.pack(anchor="w", padx=30, pady=12)
+        self.chk_enabled.pack(anchor="w", padx=30, pady=10)
         
         lbl_src_title = ctk.CTkLabel(frame_inputs, text="Configure Video Source Info:", font=("Arial", 14, "bold"))
-        lbl_src_title.pack(anchor="w", padx=20, pady=10)
+        lbl_src_title.pack(anchor="w", padx=20, pady=(15, 10))
         
         self.setting_radio_var = ctk.StringVar(value="video")
         self.rdo_v = ctk.CTkRadioButton(frame_inputs, text="Test with MP4 Video File", variable=self.setting_radio_var, value="video")
@@ -638,9 +708,9 @@ class CCTVApp(ctk.CTk):
         self.lbl_area_color_hex.pack(anchor="w", padx=30, pady=(0, 5))
         
         btn_save_config = ctk.CTkButton(frame_inputs, text="💾 Save Current Channel Settings", command=self.save_current_channel_settings, fg_color="#27AE60", hover_color="#1E8449", font=("Arial", 14, "bold"), height=42)
-        btn_save_config.pack(anchor="w", padx=20, pady=35, fill="x")
+        btn_save_config.pack(anchor="w", padx=20, pady=25, fill="x")
         
-        # 📌 จัดโครงสร้างฝั่งขวา: ย้ายคู่มือ ปุ่ม Reset และหน้าจอวาดเรียงดิ่งลงข้างล่างตามสั่ง
+        # 📌 จัดโครงสร้างฝั่งขวา: คู่มือ ปุ่ม Reset และหน้าจอวาดเรียงดิ่งลงข้างล่าง
         self.lbl_preview_title = ctk.CTkLabel(frame_preview, text="📌 Area Boundary Map Drawer View (CH 1)", font=("Arial", 14, "bold"), text_color="#3498DB")
         self.lbl_preview_title.pack(pady=5)
         
@@ -648,7 +718,6 @@ class CCTVApp(ctk.CTk):
         self.preview_label.pack(padx=10, pady=5, expand=True)
         self.preview_label.bind("<Button-1>", self.on_preview_canvas_click)
         
-        # ย้ายมาไว้ข้างใต้จอตามโจทย์สั่ง
         frame_under_layout = ctk.CTkFrame(frame_preview, fg_color="transparent")
         frame_under_layout.pack(fill="x", padx=15, pady=10)
         
@@ -659,6 +728,29 @@ class CCTVApp(ctk.CTk):
         btn_clear_pt.pack(side="right", padx=10)
         
         self.update_channel_fields_in_gui(0)
+
+
+    def on_master_model_changed(self, choice):
+        print(f"Switching Master AI Model to: {choice}.pt")
+        try:
+            # 1. บันทึกค่าลงตัวแปรกลาง
+            self.global_model_name = choice
+            
+            # 2. โหลดโมเดลใหม่เข้าสู่ระบบ
+            from ultralytics import YOLO
+            self.model = YOLO(f"{choice}.pt")
+            
+            # 3. ส่งเข้า Device (GPU/CPU)
+            import torch
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model.to(dev)
+            
+            # 4. บันทึกลงไฟล์ config.json ทันที
+            self.save_multi_config()
+            print(f"Master Model successfully changed and saved to {choice}.pt")
+            
+        except Exception as e:
+            print(f"Error switching master model {choice}: {e}")
 
     def normalize_hex_color(self, hex_color, default=DEFAULT_AREA_COLOR):
         if not hex_color or not isinstance(hex_color, str):

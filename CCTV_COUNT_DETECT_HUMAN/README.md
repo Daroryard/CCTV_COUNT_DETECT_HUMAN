@@ -75,12 +75,12 @@ py -m venv venv
 pip install -r requirements.txt
 ```
 
-หรือติดตั้งทีละตัว:
+หรือติดตั้ง:
 
 ```powershell
-pip install opencv-python customtkinter Pillow ultralytics shapely numpy pystray
+pip install opencv-python customtkinter Pillow ultralytics shapely numpy pystray 
+python -m pip install opencv-python customtkinter Pillow ultralytics shapely numpy pystray pyinstaller
 ```
-
 ### 4. Library ที่ใช้ในโปรเจกต์
 
 | Library | ใช้ทำอะไร |
@@ -178,7 +178,8 @@ pip install pyinstaller
 
 2. เตรียมไฟล์ใน `source_code/`:
 
-   - `yolov8n.pt`
+   - `yolov8s.pt`
+   - `yolov8m.pt`
    - `multi_config.json`
    - `test.mp4`, `test1.mp4` (ถ้าใช้ทดสอบ)
    - `cctv-camera.ico` (ไอคอน)

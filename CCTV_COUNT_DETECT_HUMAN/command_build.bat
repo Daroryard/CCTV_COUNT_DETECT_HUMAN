@@ -12,7 +12,8 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo [SUCCESS] Build completed! Copying resource files to 'dist' folder...
     
-    copy "yolov8n.pt" "..\dist\"
+    copy "yolov8s.pt" "..\dist\"
+    copy "yolov8m.pt" "..\dist\"
     copy "multi_config.json" "..\dist\"
     copy "test.mp4" "..\dist\"
     copy "test1.mp4" "..\dist\"
