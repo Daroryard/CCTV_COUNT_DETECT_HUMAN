@@ -621,7 +621,7 @@ class CCTVApp(ctk.CTk):
         lbl_model_title = ctk.CTkLabel(frame_inputs, text="🎯 Master AI Model (Apply All Channels):", font=("Arial", 14, "bold"), text_color="#3498DB")
         lbl_model_title.pack(anchor="w", padx=20, pady=(10, 5))
         
-        model_options = ["yolov8s", "yolov8m"]
+        model_options = ["yolov8m", "yolov8s"]
         self.combo_model = ctk.CTkComboBox(
             frame_inputs, 
             values=model_options, 
